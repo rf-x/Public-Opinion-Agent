@@ -70,6 +70,7 @@ class ChatRequest(BaseModel):
     message: str
     history: List[dict]
     enableSearch: bool = False
+    newsContext: Optional[dict] = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -83,15 +84,7 @@ async def chat(request: ChatRequest):
         exa_client = ExaClient()
         
         # Build conversation context
-        system_prompt = """你是一个专业的舆情分析专家。请基于用户的问题和对话历史，提供专业、准确的舆情分析和建议。
-        
-        回答要求：
-        1. 保持专业性和客观性
-        2. 提供具体的数据和事实支撑
-        3. 给出实用的建议和解决方案
-        4. 使用清晰的结构和逻辑
-        5. 如果涉及敏感话题，保持谨慎和负责任的态度
-        6. 如果提供了搜索结果，请基于搜索结果进行分析，并引用相关来源"""
+        system_prompt = """你是一个数据分析专家。请基于用户的问题和对话历史，提供专业、准确的回答。"""
         
         # Format conversation history
         conversation_text = ""
@@ -111,18 +104,48 @@ async def chat(request: ChatRequest):
             except Exception as e:
                 search_context = f"\n\n搜索时出现错误：{str(e)}"
         
+        # Add news context if provided
+        news_context = ""
+        if request.newsContext and request.newsContext.get("news"):
+            news_data = request.newsContext["news"]
+            news_context = f"\n\n相关新闻数据（共{len(news_data)}条）：\n"
+            for i, news in enumerate(news_data, 1):  # 限制显示前10条新闻
+                news_context += f"\n{i}. 标题：{news.get('title', '无标题')}\n"
+                news_context += f"   来源：{news.get('source', '未知')}\n"
+                news_context += f"   时间：{news.get('publishedAt', '未知')}\n"
+                news_context += f"   作者：{news.get('author', '')}\n"
+                news_context += f"   内容：{news.get('content', '')}\n"
+                news_context += f"   链接：{news.get('url', '')}\n"
+                    
+        
         user_prompt = f"""对话历史：
 {conversation_text}
 
-用户当前问题：{request.message}{search_context}
+相关参考信息：
+{search_context}{news_context}
 
-请提供专业的舆情分析和建议："""
+用户当前问题：{request.message}"""
+        print(user_prompt)
 
-        # Get AI response
-        response = await llm.complete(
-            system_message=system_prompt,
-            user_message=user_prompt
-        )
+        # Get AI response with better error handling
+        try:
+            response = await llm.complete(
+                system_message=system_prompt,
+                user_message=user_prompt
+            )
+        except Exception as e:
+            error_msg = str(e)
+            print(f"LLM API调用失败: {error_msg}")
+            
+            # 根据错误类型提供更友好的错误信息
+            if "401" in error_msg or "API密钥" in error_msg:
+                raise HTTPException(status_code=500, detail="API密钥配置错误，请联系管理员检查DeepSeek API密钥设置")
+            elif "400" in error_msg:
+                raise HTTPException(status_code=500, detail="请求参数错误，可能是模型名称不正确或请求格式有问题")
+            elif "429" in error_msg:
+                raise HTTPException(status_code=500, detail="API调用频率过高，请稍后重试")
+            else:
+                raise HTTPException(status_code=500, detail=f"AI服务暂时不可用: {error_msg}")
 
         # Create or update conversation
         conv_id = request.conversationId or str(uuid.uuid4())
@@ -151,8 +174,11 @@ async def chat(request: ChatRequest):
             searchResults=search_results if request.enableSearch else None
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"对话处理失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"对话处理失败: {str(e)}")
 
 @router.get("/conversations")
 async def list_conversations():

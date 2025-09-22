@@ -26,6 +26,8 @@ class GenerateReportRequest(BaseModel):
     customOutlineSections: Optional[int] = None
     customOutlineTitles: Optional[List[str]] = None
     customOutlineReqs: Optional[List[str]] = None
+    # 新闻上下文
+    newsContext: Optional[dict] = None
 
 
 class GenerateReportResponse(BaseModel):
@@ -44,6 +46,7 @@ async def generate_report(payload: GenerateReportRequest):
             topic=payload.topic,
             outline=payload.outline,
             refinements=payload.refinements or [],
+            news_context=payload.newsContext,
         )
         return GenerateReportResponse(report_markdown=markdown, sources=sources)
     except Exception as e:
@@ -59,6 +62,7 @@ async def generate_report_stream(payload: GenerateReportRequest):
                 topic=payload.topic,
                 outline=payload.outline,
                 refinements=payload.refinements or [],
+                news_context=payload.newsContext,
             )
             # Save to file-based history first
             item = _save_history(

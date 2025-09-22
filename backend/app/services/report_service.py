@@ -14,7 +14,7 @@ class ReportService:
         self.exa = ExaClient()
         self.default_model = model or settings.LLM_MODEL
 
-    async def generate_report(self, topic: str, outline: List[str], refinements: List[str]) -> Tuple[str, List[str]]:
+    async def generate_report(self, topic: str, outline: List[str], refinements: List[str], news_context: Optional[Dict] = None) -> Tuple[str, List[str]]:
         # Organize requirements by section
         section_to_requirements = self._group_requirements_by_section(outline=outline, refinements=refinements)
 
@@ -24,6 +24,13 @@ class ReportService:
         # 添加报告标题
         title_md = f"# {topic}\n\n"
         sections_markdown.append(title_md)
+        
+        # 如果有新闻上下文，添加新闻数据摘要
+        if news_context and news_context.get("news"):
+            news_data = news_context["news"]
+            news_summary = await self._generate_news_summary(topic, news_data)
+            if news_summary:
+                sections_markdown.append(news_summary)
 
         for section in outline:
             requirements = section_to_requirements.get(section, [])
@@ -50,6 +57,7 @@ class ReportService:
                 section=section,
                 requirements=requirements,
                 research_snippets=research_snippets,
+                news_context=news_context,
             )
             if section_md:
                 # Ensure each section has a clear heading
@@ -119,24 +127,40 @@ class ReportService:
         except Exception:
             return base
 
-    async def _synthesize_section(self, topic: str, section: str, requirements: List[str], research_snippets: List[str]) -> str:
+    async def _synthesize_section(self, topic: str, section: str, requirements: List[str], research_snippets: List[str], news_context: Optional[Dict] = None) -> str:
         # 根据节名和要求的特殊性，定制不同的提示词
         section_prompt = self._get_section_specific_prompt(section, requirements)
         
         req_md = "\n".join([f"- {r}" for r in requirements]) if requirements else "- 无具体要求"
         research_md = "\n\n".join([s.strip() for s in research_snippets if s.strip()]) or ""
         
+        # 添加新闻上下文信息
+        news_md = ""
+        if news_context and news_context.get("news"):
+            news_data = news_context["news"]
+            news_md = f"\n\n相关新闻数据（共{len(news_data)}条）：\n"
+            for i, news in enumerate(news_data[:5], 1):  # 限制显示前5条新闻
+                news_md += f"\n{i}. 标题：{news.get('title', '无标题')}\n"
+                news_md += f"   来源：{news.get('source', '未知')}\n"
+                news_md += f"   时间：{news.get('publishedAt', '未知')}\n"
+                if news.get('summary'):
+                    news_md += f"   摘要：{news.get('summary', '')}\n"
+                if news.get('sentiment'):
+                    news_md += f"   情感：{news.get('sentiment', '')}\n"
+        
         prompt = (
             f"主题: {topic}\n"
             f"当前小节: {section}\n"
             f"小节要求:\n{req_md}\n\n"
             f"以下为网络调研摘录（可引用）：\n\n{research_md}\n\n"
+            f"{news_md}\n\n"
             f"{section_prompt}\n\n"
             "请仅输出该小节的 Markdown 内容，要求：\n"
             "- 结构清晰、信息准确、条理分明\n"
             "- 可使用表格、要点、数据等格式\n"
             "- 内容要具体、可操作、有深度\n"
-            "- 语言专业、客观、严谨")
+            "- 语言专业、客观、严谨\n"
+            "- 如果提供了新闻数据，请结合新闻内容进行分析")
         
         section_md = await self.llm.complete(
             system_message=(
@@ -219,3 +243,67 @@ class ReportService:
             user_message=prompt,
         )
         return result or draft
+
+    async def _generate_news_summary(self, topic: str, news_data: List[Dict]) -> str:
+        """生成新闻数据摘要"""
+        if not news_data:
+            return ""
+        
+        # 统计信息
+        total_news = len(news_data)
+        sources = list(set([news.get('source', '未知') for news in news_data]))
+        sentiments = [news.get('sentiment', '中性') for news in news_data]
+        positive_count = sentiments.count('正面')
+        negative_count = sentiments.count('负面')
+        neutral_count = sentiments.count('中性')
+        
+        # 时间范围
+        dates = [news.get('publishedAt', '') for news in news_data if news.get('publishedAt')]
+        if dates:
+            dates.sort()
+            time_range = f"{dates[0][:10]} 至 {dates[-1][:10]}"
+        else:
+            time_range = "时间范围未知"
+        
+        # 生成摘要
+        summary_prompt = f"""
+        基于以下新闻数据，生成一个简洁的数据概览：
+        
+        主题：{topic}
+        新闻总数：{total_news}条
+        时间范围：{time_range}
+        主要来源：{', '.join(sources[:5])}
+        情感分布：正面{positive_count}条，负面{negative_count}条，中性{neutral_count}条
+        
+        请生成一个2-3段的Markdown格式摘要，包括：
+        1. 数据概览
+        2. 主要趋势和特点
+        3. 关键发现
+        
+        要求简洁明了，突出关键信息。
+        """
+        
+        try:
+            summary = await self.llm.complete(
+                system_message="你是一个数据分析专家，擅长从新闻数据中提取关键信息和趋势。",
+                user_message=summary_prompt
+            )
+            if summary:
+                return f"## 数据概览\n\n{summary.strip()}\n\n"
+        except Exception:
+            pass
+        
+        # 如果AI生成失败，返回基础统计信息
+        return f"""## 数据概览
+
+本次分析基于{topic}相关的{total_news}条新闻数据，时间范围为{time_range}。
+
+**数据分布：**
+- 新闻总数：{total_news}条
+- 主要来源：{', '.join(sources[:5])}
+- 情感分布：正面{positive_count}条，负面{negative_count}条，中性{neutral_count}条
+
+**分析说明：**
+以下分析将结合这些新闻数据，从多个维度深入探讨{topic}的相关情况。
+
+"""
